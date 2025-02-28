@@ -1,0 +1,1 @@
+A console utility for updating from Assert Syntax from NUnit 3 to NUnit 4. Most but not all Assertions are supported at the moment. Pass in the absolute path of your test project and it will modify the files directly.  
