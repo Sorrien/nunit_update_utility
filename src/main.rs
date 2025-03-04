@@ -7,7 +7,7 @@ use std::{
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-const METHODS: [(&str, &str, usize, bool); 20] = [
+const METHODS: [(&str, &str, usize, bool); 28] = [
     ("Assert.AreEqual(", "Is.EqualTo", 2, false),
     ("Assert.AreSame(", "Is.SameAs", 2, false),
     ("Assert.IsFalse(", "Is.False", 1, false),
@@ -28,6 +28,24 @@ const METHODS: [(&str, &str, usize, bool); 20] = [
     ("Assert.IsPositive(", "Is.Positive", 1, false),
     ("Assert.Zero(", "Is.Zero", 1, false),
     ("Assert.NotZero(", "Is.Not.Zero", 1, false),
+    ("Assert.IsInstanceOf(", "Is.InstanceOf", 2, false),
+    ("Assert.IsInstanceOf<", "Is.InstanceOf", 1, false),
+    ("Assert.IsNotInstanceOf(", "Is.Not.InstanceOf", 2, false),
+    ("Assert.IsNotInstanceOf<", "Is.Not.InstanceOf", 1, false),
+    ("Assert.IsAssignableFrom(", "Is.AssignableFrom", 2, false),
+    ("Assert.IsAssignableFrom<", "Is.AssignableFrom", 1, false),
+    (
+        "Assert.IsNotAssignableFrom(",
+        "Is.Not.AssignableFrom",
+        2,
+        false,
+    ),
+    (
+        "Assert.IsNotAssignableFrom<",
+        "Is.Not.AssignableFrom",
+        1,
+        false,
+    ),
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,59 +54,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cs_paths = get_cs_files_in_folder(path_str);
 
     cs_paths.par_iter().for_each(|path| {
-        let file = File::open(path.clone()).unwrap();
-        let mut file = BufReader::new(file);
-        let mut line = String::new();
+        file_replacement(path).unwrap();
+    });
 
-        let file_name = path.file_name().unwrap().to_str().unwrap();
-        let tmp_name = format!("{}.tmp", file_name);
-        let parent = PathBuf::from(path.clone().parent().unwrap());
-        let mut tmp_path = parent.into_os_string();
-        tmp_path.push(tmp_name);
+    Ok(())
+}
 
-        let output_file = File::create(tmp_path.clone()).unwrap();
-        let mut output_file = BufWriter::new(output_file);
+pub fn file_replacement(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::open(path.clone())?;
+    let mut file = BufReader::new(file);
+    let mut line = String::new();
 
-        let mut modification_made = false;
+    let file_name = path.file_name().unwrap().to_str().unwrap();
+    let tmp_name = format!("{}.tmp", file_name);
+    let parent = PathBuf::from(path.clone().parent().unwrap());
+    let mut tmp_path = parent.into_os_string();
+    tmp_path.push(tmp_name);
 
-        while let Ok(len) = file.read_line(&mut line) {
-            if len == 0 {
+    let output_file = File::create(tmp_path.clone())?;
+    let mut output_file = BufWriter::new(output_file);
+
+    while let Ok(len) = file.read_line(&mut line) {
+        if len == 0 {
+            break;
+        }
+        if line == "\n" {
+            continue;
+        }
+        let mut new_line = String::new();
+        for (method, new_method, param_len, preserve_order) in &METHODS {
+            if let Some(result) =
+                replacement(&line, method, new_method, *param_len, *preserve_order)
+            {
+                new_line = result;
                 break;
             }
-            if line == "\n" {
-                continue;
-            }
-            let mut new_line = String::new();
-            for (method, new_method, param_len, preserve_order) in &METHODS {
-                if let Some(result) =
-                    replacement(&line, method, new_method, *param_len, *preserve_order)
-                {
-                    modification_made = true;
-                    new_line = result;
-                    break;
-                }
-            }
-
-            let new_line = if new_line.len() == 0 {
-                line.as_str()
-            } else {
-                new_line.as_str()
-            };
-
-            output_file
-                .write_all(format!("{}", new_line).as_bytes())
-                .unwrap();
-            line.clear();
         }
-        output_file.flush().unwrap();
 
-        if modification_made {
-            std::fs::remove_file(path.clone()).unwrap();
-            std::fs::rename(tmp_path, path).unwrap();
+        let new_line = if new_line.len() == 0 {
+            line.as_str()
         } else {
-            std::fs::remove_file(tmp_path).unwrap();
-        }
-    });
+            new_line.as_str()
+        };
+
+        output_file.write_all(format!("{}", new_line).as_bytes())?;
+        line.clear();
+    }
+    output_file.flush()?;
+
+    std::fs::remove_file(path.clone())?;
+    std::fs::rename(tmp_path, path)?;
     Ok(())
 }
 
@@ -101,21 +116,25 @@ pub fn replacement(
 ) -> Option<String> {
     let mut parameters = vec![];
     if let Some(start_index) = line.find(method) {
-        let start = start_index + method.len();
+        let start = start_index + method.len() - 1;
         let chars = line.chars().collect::<Vec<_>>();
 
         let mut i = start;
         let mut parenthesis_depth = 0;
         let mut parameter = String::new();
+        let mut generic = String::new();
+        let mut in_angle_brackets = false;
 
         for next_char in &chars[i..] {
             match *next_char {
                 '(' => {
+                    if parenthesis_depth > 0 {
+                        parameter.push(*next_char);
+                    }
                     parenthesis_depth += 1;
-                    parameter.push(*next_char);
                 }
                 ')' => {
-                    if parenthesis_depth == 0 {
+                    if parenthesis_depth == 1 {
                         parameters.push(parameter.clone());
                         parameter.clear();
                     } else {
@@ -124,7 +143,7 @@ pub fn replacement(
                     }
                 }
                 ',' => {
-                    if parenthesis_depth == 0 {
+                    if parenthesis_depth == 1 {
                         parameters.push(parameter.clone());
                         parameter.clear();
                         if chars[i + 1].is_ascii_whitespace() {
@@ -137,13 +156,29 @@ pub fn replacement(
                 ';' => {
                     break;
                 }
+                '<' => {
+                    in_angle_brackets = true;
+                }
+                '>' => {
+                    in_angle_brackets = false;
+                }
                 _ => {
-                    parameter.push(*next_char);
+                    if in_angle_brackets {
+                        generic.push(*next_char);
+                    } else {
+                        parameter.push(*next_char);
+                    }
                 }
             }
 
             i += 1;
         }
+
+        let new_method = if generic.len() > 0 {
+            &format!("{}<{}>()", new_method, generic)
+        } else {
+            new_method
+        };
 
         parameters
             .iter_mut()
@@ -258,6 +293,58 @@ mod tests {
         assert_eq!(
             result,
             r#"             Assert.That(GetMethod_Clone(_objname.TypeId.Value, _typeId), Is.EqualTo(actual.Id), "Explanation");
+"#
+        );
+    }
+
+    #[test]
+    fn instance_of_type_of() {
+        let contents = r#"             Assert.IsInstanceOf(typeof(Exception), new Exception(), "");
+"#;
+
+        let result = test_replacement(20, contents);
+        assert_eq!(
+            result,
+            r#"             Assert.That(new Exception(), Is.InstanceOf(typeof(Exception)), "");
+"#
+        );
+    }
+
+    #[test]
+    fn instance_of_generic() {
+        let contents = r#"             Assert.IsInstanceOf<Exception>(new Exception(), "");
+"#;
+
+        let result = test_replacement(21, contents);
+        assert_eq!(
+            result,
+            r#"             Assert.That(new Exception(), Is.InstanceOf<Exception>(), "");
+"#
+        );
+    }
+
+    #[test]
+    fn assignable_from_type_of() {
+        let contents = r#"             Assert.IsAssignableFrom(typeof(Exception), new Exception(), "");
+"#;
+
+        let result = test_replacement(22, contents);
+        assert_eq!(
+            result,
+            r#"             Assert.That(new Exception(), Is.AssignableFrom(typeof(Exception)), "");
+"#
+        );
+    }
+
+    #[test]
+    fn assignable_from_generic() {
+        let contents = r#"             Assert.IsAssignableFrom<Exception>(new Exception(), "");
+"#;
+
+        let result = test_replacement(23, contents);
+        assert_eq!(
+            result,
+            r#"             Assert.That(new Exception(), Is.AssignableFrom<Exception>(), "");
 "#
         );
     }
